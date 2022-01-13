@@ -1,33 +1,207 @@
+import 'dart:io';
+import 'dart:isolate';
+import 'dart:ui';
+
 import 'package:flutter/material.dart';
 import 'package:flutter/rendering.dart';
-import 'package:photo_view/photo_view.dart';
-import 'package:photo_view/photo_view_gallery.dart';
 import 'package:english_words/english_words.dart';
+import 'package:flutter_downloader/flutter_downloader.dart';
+import 'package:open_file/open_file.dart';
+import 'package:package_info/package_info.dart';
+import 'package:path_provider/path_provider.dart';
+import 'package:pkln_shop/http/api_response.dart';
+import 'package:pkln_shop/model/version_entity.dart';
 import 'package:pkln_shop/views/login/login_page.dart';
+import 'package:progress_dialog/progress_dialog.dart';
 
 import 'package:shared_preferences/shared_preferences.dart';
+
+import 'detail_page.dart';
 
 class IndexPage extends StatefulWidget {
   IndexPage({
     Key key,
   }) : super(key: key);
-
   @override
   _IndexPageState createState() => _IndexPageState();
 }
-
 class _IndexPageState extends State<IndexPage> {
   final controller = TextEditingController();
   final _saved = new Set<WordPair>();
   final _biggerFont = const TextStyle(fontSize: 18.0);
+  //自动更新字段
+  String serviceVersionCode = '';
+  String downloadUrl = '';
+  String buildVersion = '';
+  String buildUpdateDescription = '';
+  ProgressDialog pr;
+  String apkName = 'pkln_shop.apk';
+  String appPath = '';
+  ReceivePort _port = ReceivePort();
+
   List<String> assetNames = [
     'assets/images/splash.png',
     'assets/images/my_head.jpg',
     'assets/images/icon.png',
   ];
 
-  // 承载listView的滚动视图
-  ScrollController _scrollController = ScrollController();
+  @override
+  void initState() {
+    super.initState();
+    IsolateNameServer.registerPortWithName(
+        _port.sendPort, 'downloader_send_port');
+    _port.listen(_updateDownLoadInfo);
+    FlutterDownloader.registerCallback(_downLoadCallback);
+    afterFirstLayout(context);
+  }
+
+  @override
+  void dispose() {
+    super.dispose();
+  }
+
+  @override
+  void afterFirstLayout(BuildContext context) {
+    // 如果是android，则执行热更新
+    if (Platform.isAndroid) {
+      _getNewVersionAPP(context);
+    }
+  }
+
+  /// 执行版本更新的网络请求
+  _getNewVersionAPP(context) async {
+    ApiResponse<VersionEntity> entity = await VersionEntity.getVersion();
+    serviceVersionCode = entity.data.data.buildVersionNo;
+    buildVersion = entity.data.data.buildVersion;
+    buildUpdateDescription = entity.data.data.buildUpdateDescription;
+    downloadUrl = entity.data.data.downloadUrl;
+    _checkVersionCode();
+  }
+
+  /// 检查当前版本是否为最新，若不是，则更新
+  void _checkVersionCode() {
+    PackageInfo.fromPlatform().then((PackageInfo packageInfo) {
+      var currentVersionCode = packageInfo.buildNumber;
+      if (int.parse(serviceVersionCode) > int.parse(currentVersionCode)) {
+        _showNewVersionAppDialog();
+      }
+    });
+  }
+
+  /// 版本更新提示对话框
+  Future<void> _showNewVersionAppDialog() async {
+    return showDialog<void>(
+        context: context,
+        barrierDismissible: false,
+        builder: (BuildContext context) {
+          return AlertDialog(
+            title: new Row(
+              children: <Widget>[
+                new Padding(
+                    padding: const EdgeInsets.fromLTRB(30.0, 0.0, 10.0, 0.0),
+                    child: new Text("发现新版本"))
+              ],
+            ),
+            content: new Text(
+                buildUpdateDescription + "（" + buildVersion + ")"
+            ),
+            actions: <Widget>[
+              new FlatButton(
+                child: new Text('下次再说'),
+                onPressed: () {
+                  Navigator.of(context).pop();
+                },
+              ),
+              new FlatButton(
+                child: new Text('立即更新'),
+                onPressed: () {
+                  _doUpdate(context);
+                },
+              )
+            ],
+          );
+        });
+  }
+
+
+  /// 执行更新操作
+  _doUpdate(BuildContext context) async {
+    Navigator.pop(context);
+    _executeDownload(context);
+  }
+
+  /// 下载最新apk包
+  Future<void> _executeDownload(BuildContext context) async {
+    pr = new ProgressDialog(
+      context,
+      type: ProgressDialogType.Download,
+      isDismissible: true,
+      showLogs: true,
+    );
+    pr.style(message: '准备下载...');
+    if (!pr.isShowing()) {
+      pr.show();
+    }
+
+    final path = await _apkLocalPath;
+    await FlutterDownloader.enqueue(
+        url: downloadUrl,
+        savedDir: path,
+        fileName: apkName,
+        showNotification: true,
+        openFileFromNotification: true
+    );
+  }
+
+  /// 下载进度回调函数
+  static void _downLoadCallback(String id, DownloadTaskStatus status,
+      int progress) {
+    final SendPort send = IsolateNameServer.lookupPortByName(
+        'downloader_send_port');
+    send.send([id, status, progress]);
+  }
+
+  /// 更新下载进度框
+  _updateDownLoadInfo(dynamic data) {
+    DownloadTaskStatus status = data[1];
+    int progress = data[2];
+    if (status == DownloadTaskStatus.running) {
+      pr.update(
+          progress: double.parse(progress.toString()), message: "下载中，请稍后…");
+    }
+    if (status == DownloadTaskStatus.failed) {
+      if (pr.isShowing()) {
+        pr.hide();
+      }
+    }
+
+    if (status == DownloadTaskStatus.complete) {
+      if (pr.isShowing()) {
+        pr.hide();
+      }
+      _installApk();
+    }
+  }
+
+  /// 安装apk
+  Future<Null> _installApk() async {
+    await OpenFile.open(appPath + '/' + apkName);
+  }
+
+  /// 获取apk存储位置
+  Future<String> get _apkLocalPath async {
+    final directory = await getExternalStorageDirectory();
+    String path = directory.path + Platform.pathSeparator + 'Download';
+    final savedDir = Directory(path);
+    bool hasExisted = await savedDir.exists();
+    if (!hasExisted) {
+      await savedDir.create();
+    }
+    this.setState(() {
+      appPath = path;
+    });
+    return path;
+  }
 
   // tabs 容器
   Widget buildAppBarTabs() {
@@ -53,6 +227,7 @@ class _IndexPageState extends State<IndexPage> {
         Expanded(
             child: Card(
           child: new Container(
+            height: 40,
             child: new Row(
               crossAxisAlignment: CrossAxisAlignment.center,
               children: <Widget>[
@@ -69,7 +244,7 @@ class _IndexPageState extends State<IndexPage> {
                     child: TextField(
                       controller: this.controller,
                       decoration: new InputDecoration(
-                          contentPadding: EdgeInsets.only(bottom: 2.0),
+                          contentPadding: EdgeInsets.only(bottom: 10.0),
                           hintText: '输入关键字',
                           border: InputBorder.none),
                       onSubmitted: (value) {
@@ -96,16 +271,10 @@ class _IndexPageState extends State<IndexPage> {
     );
   }
 
-  void _pushSaved() {
-    /* Navigator.pushReplacement(
-      context,
-      MaterialPageRoute(
-        builder: (context) {
-          return LoginPage(
-          );
-        },
-      ),
-    );*/
+  void _pushSaved() async{
+    PackageInfo packageInfo = await PackageInfo.fromPlatform();
+    String version = packageInfo.version; //版本号
+    String buildNumber = packageInfo.buildNumber; //版本构建号
     Navigator.of(context).push(
       new MaterialPageRoute(
         builder: (context) {
@@ -117,7 +286,10 @@ class _IndexPageState extends State<IndexPage> {
             body: new ListView(padding: EdgeInsets.all(10), children: <Widget>[
               ListTile(
                 leading: Icon(Icons.search),
-                title: Text('版本信息'),
+                title: Text('版本信息（$version）'),
+                onTap: () async {
+                  afterFirstLayout(context);
+                },
               ),
               Divider(
                 height: 10.0,
@@ -183,11 +355,15 @@ class _IndexPageState extends State<IndexPage> {
                           print(assetNames[index]);
                           Navigator.of(context)
                               .push(MaterialPageRoute(builder: (context) {
-                            return PhotoPreview(
+                            return DetailPage(
                               initialIndex: index,
                               photoList: assetNames,
                             );
                           }));
+                        },
+                        onLongPress: () {
+                          //debug:
+                          print('长按');
                         },
                         child: Column(children: <Widget>[
                           Container(
@@ -334,12 +510,12 @@ class _IndexPageState extends State<IndexPage> {
             Container(
               width: double.infinity,
               color: Colors.blue,
-              margin: EdgeInsets.only(bottom: 1.0),
+              /*margin: EdgeInsets.only(bottom: 1.0),
               padding: EdgeInsets.symmetric(
                 // 同appBar的titleSpacing一致
                 horizontal: NavigationToolbar.kMiddleSpacing,
                 vertical: 20.0,
-              ),
+              ),*/
               child: buildAppBarTabs(),
             ),
             Expanded(
@@ -352,7 +528,7 @@ class _IndexPageState extends State<IndexPage> {
       floatingActionButtonLocation: FloatingActionButtonLocation.centerDocked,
       floatingActionButton: FloatingActionButton(
         backgroundColor: Colors.blue,
-        child: Icon(Icons.add),
+        child: Icon(Icons.person),
         onPressed: () {},
       ),
       bottomNavigationBar: BottomAppBar(
@@ -391,44 +567,50 @@ class AppBarTabsItem extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    return Column(
-      children: [
-        Container(
-          width: 100,
-          padding: EdgeInsets.all(6.0),
-          decoration: BoxDecoration(
-              color: this.color, borderRadius: BorderRadius.circular(6.0)),
-          child: Icon(
-            this.icon,
-            size: IconTheme.of(context).size - 6,
-            color: Colors.white,
+    return Container(
+      margin: EdgeInsets.only(left:6,top: 6),
+      child: new Material(
+        child: new Ink(
+          //设置背景
+          decoration: new BoxDecoration(
+            //背景
+            color: this.color,
+            //设置四周圆角 角度
+           /* borderRadius: BorderRadius.all(Radius.circular(5.0)),*/
+            //设置四周边框
+          ),
+          child: new InkResponse(
+            borderRadius: new BorderRadius.all(new Radius.circular(25.0)),
+            //点击或者toch控件高亮时显示的控件在控件上层,水波纹下层
+//                highlightColor: Colors.deepPurple,
+            //点击或者toch控件高亮的shape形状
+            highlightShape: BoxShape.rectangle,
+            //.InkResponse内部的radius这个需要注意的是，我们需要半径大于控件的宽，如果radius过小，显示的水波纹就是一个很小的圆，
+            //水波纹的半径
+            radius: 300.0,
+            //水波纹的颜色
+            splashColor: Colors.yellow,
+            //true表示要剪裁水波纹响应的界面   false不剪裁  如果控件是圆角不剪裁的话水波纹是矩形
+            containedInkWell: true,
+            //点击事件
+            onTap: () {
+              print("click");
+            },
+            child: Container(
+              //设置 child 居中
+              alignment: Alignment(0, 0),
+              height: 40,
+              width: 100,
+              child: Text(this.text,
+                style: TextStyle(
+                  color: Colors.white, // 文字颜色
+                )),
+            ),
           ),
         ),
-        SizedBox(
-          height: 5.0,
-        ),
-        Text(
-          this.text,
-          style: TextStyle(
-            color: Colors.white, // 文字颜色
-          ),
-        ),
-      ],
+      ),
     );
   }
-}
-
-//PhotoPreview 点击小图后的效果
-class PhotoPreview extends StatefulWidget {
-  final int initialIndex;
-  final List<String> photoList;
-  final PageController pageController;
-
-  PhotoPreview({this.initialIndex, this.photoList})
-      : pageController = PageController(initialPage: initialIndex);
-
-  @override
-  _PhotoPreviewState createState() => _PhotoPreviewState();
 }
 
 class HeroHeader extends SliverPersistentHeaderDelegate {
@@ -491,39 +673,3 @@ class HeroHeader extends SliverPersistentHeaderDelegate {
   FloatingHeaderSnapConfiguration get snapConfiguration => null;
 }
 
-class _PhotoPreviewState extends State<PhotoPreview> {
-  int currentIndex;
-
-  @override
-  void initState() {
-    currentIndex = widget.initialIndex;
-    super.initState();
-  }
-
-  //图片切换
-  void onPageChanged(int index) {
-    setState(() {
-      currentIndex = index;
-    });
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    return Container(
-      child: PhotoViewGallery.builder(
-        scrollPhysics: const BouncingScrollPhysics(),
-        onPageChanged: onPageChanged,
-        itemCount: widget.photoList.length,
-        pageController: widget.pageController,
-        builder: (BuildContext context, int index) {
-          return PhotoViewGalleryPageOptions(
-            imageProvider: AssetImage(widget.photoList[index]),
-            minScale: PhotoViewComputedScale.contained * 0.6,
-            maxScale: PhotoViewComputedScale.covered * 1.1,
-            initialScale: PhotoViewComputedScale.contained,
-          );
-        },
-      ),
-    );
-  }
-}

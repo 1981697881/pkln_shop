@@ -1,6 +1,7 @@
 import 'dart:convert';
 import 'dart:io';
 import 'dart:async';
+import 'package:flutter_downloader/flutter_downloader.dart';
 import 'package:pkln_shop/model/login_entity.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
@@ -17,6 +18,10 @@ const Color _primaryColor = Colors.blue;
 void main(List<String> args) async{
   HttpUtils.init(
     baseUrl: "http://61.146.130.53:50252/K3Cloud/",
+  );
+  WidgetsFlutterBinding.ensureInitialized();
+  await FlutterDownloader.initialize(
+      debug: true
   );
   runApp(MyApp());
   if (Platform.isAndroid) {
